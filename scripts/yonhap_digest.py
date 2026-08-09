@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 연합뉴스 인사(人事)·부고 페이지를 확인해서, 직전 영업일 08:40 ~ 당일 08:40(KST) 사이에
-올라온 항목 중 "언론사" 관련 소식만 골라 Outlook으로 메일을 보내는 스크립트.
+올라온 항목을 Outlook으로 메일을 보내는 스크립트.
 월요일 실행분은 주말을 건너뛴 만큼(금요일 08:40부터) 모아서 확인합니다.
 
 실행 주체: GitHub Actions (평일 08:40 KST 스케줄)
@@ -17,8 +17,6 @@
     이렇게 하면 사이트의 사소한 마크업 변경에는 잘 버티지만, 실제 페이지와 크게 다를 경우
     항목을 하나도 못 찾을 수 있습니다. 그런 경우를 대비해:
         - 각 실행마다 원본 HTML을 debug/ 폴더에 저장해 GitHub Actions 아티팩트로 업로드합니다.
-        - 파싱된 항목이 0개면 "정상 결과가 0개인지, 파싱 실패인지" 알 수 있도록 메일 본문에
-          진단 정보(찾은 링크 수, 필터링된 개수 등)를 함께 적어 보냅니다.
         - 페이지 요청 자체가 실패하면(네트워크/차단 등) 예외를 삼키지 않고 알림 메일을 보냅니다.
     첫 실행 결과가 이상하면 debug/ 아티팩트를 열어보고 CSS 선택자를 조정해 주세요.
 """
@@ -75,12 +73,22 @@ DATE_PATTERNS = [
 ]
 
 
+WEEKDAY_KO = ["월", "화", "수", "목", "금", "토", "일"]
+
+
+def format_korean_date(dt: datetime) -> str:
+    return f"{dt.year}년 {dt.month}월 {dt.day}일 ({WEEKDAY_KO[dt.weekday()]})"
+
+
 @dataclass
 class Item:
     title: str
     link: str
     dt: datetime | None
     section: str  # "인사" or "부고"
+    company: str = ""
+    headline: str = ""  # 기사 페이지에서 다시 뽑은 제목 (목록 제목보다 정확함)
+    body: str = ""       # 기사 본문 (▲ 상세 내용)
 
     @property
     def is_media(self) -> bool:
@@ -195,45 +203,135 @@ def in_window(item: Item, start: datetime, end: datetime) -> bool:
     return item.dt is not None and start <= item.dt < end
 
 
-def build_email_html(
-    window_start: datetime,
-    window_end: datetime,
-    personnel_media: list[Item],
-    obituary_media: list[Item],
-    diagnostics: dict,
-) -> str:
-    def section_html(title: str, items: list[Item]) -> str:
-        if not items:
-            return f"<h3>{title}</h3><p style='color:#888;'>해당 없음</p>"
-        rows = "".join(
-            f"<li style='margin-bottom:8px;'>"
-            f"<a href='{it.link}' style='text-decoration:none;color:#0a5cad;'>{it.title}</a>"
-            f"<span style='color:#999;font-size:12px;'> ({it.dt.strftime('%m-%d %H:%M') if it.dt else '시간 미상'})</span>"
-            f"</li>"
-            for it in items
-        )
-        return f"<h3>{title} ({len(items)}건)</h3><ul style='padding-left:18px;'>{rows}</ul>"
+def fetch_article_detail(url: str) -> tuple[str, str]:
+    """개별 기사 페이지에서 (제목, 본문)을 뽑는다. 실패/미확인 시 ("", "")."""
+    try:
+        resp = requests.get(url, headers=REQUEST_HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+    except Exception as e:  # noqa: BLE001 - 기사 하나 실패로 전체를 죽이지 않음
+        print(f"[WARN] 기사 본문 요청 실패: {url} ({e})")
+        return "", ""
 
-    diag_html = (
-        f"<p style='color:#aaa;font-size:11px;'>"
-        f"[진단] 인사 페이지 링크 {diagnostics['personnel_total']}개 발견 / "
-        f"부고 페이지 링크 {diagnostics['obituary_total']}개 발견 "
-        f"(파싱이 잘못된 것 같으면 GitHub Actions 실행의 debug 아티팩트를 확인하세요)</p>"
-    )
+    headline = ""
+    h1 = soup.find("h1")
+    if h1:
+        headline = h1.get_text(" ", strip=True)
+    if not headline:
+        og_title = soup.find("meta", property="og:title")
+        if og_title and og_title.get("content"):
+            headline = og_title["content"].strip()
+
+    body = ""
+    article = soup.find("article")
+    if article:
+        paragraphs = [p.get_text(" ", strip=True) for p in article.find_all("p")]
+        body = " ".join(p for p in paragraphs if p)
+    if not body:
+        og_desc = soup.find("meta", property="og:description")
+        if og_desc and og_desc.get("content"):
+            body = og_desc["content"].strip()
+    if not body:
+        # 최후 수단: "▲"가 포함된 것 중 적당히 긴(30~2000자) 블록을 본문으로 추정
+        best = ""
+        for c in soup.find_all(["div", "section"]):
+            text = c.get_text(" ", strip=True)
+            if 30 < len(text) < 2000 and text.count("▲") >= 1 and len(text) > len(best):
+                best = text
+        body = best
+
+    headline = re.sub(r"\s+", " ", headline).strip()
+    body = re.sub(r"\s+", " ", body).strip()
+    return headline, body
+
+
+# 부고 괄호 안 "회사명 직함"에서 직함으로 보이는 꼬리 단어들. 이 단어들을 뒤에서부터
+# 떼어내고 남는 부분을 회사명으로 쓴다 (완벽하지 않은 휴리스틱 - 안 맞으면 이 목록에 추가).
+JOB_TITLE_WORDS = [
+    "기자", "대표", "전문위원", "부국장", "국장대행", "편집국장", "국장", "팀장",
+    "부장", "실장", "본부장", "이사", "센터장", "에디터", "위원", "사장", "회장",
+    "부사장", "상무", "전무", "주필", "논설위원", "부실장", "정치부장", "산업부장",
+    "경제부장", "사회부장", "국제부장", "문화부장", "체육부장", "보도국", "편집제작",
+    "광고부장", "디지털뉴스부", "취재부장",
+]
+
+
+def strip_trailing_job_title(paren_text: str) -> str:
+    tokens = paren_text.split()
+    while tokens and any(w in tokens[-1] for w in JOB_TITLE_WORDS):
+        tokens.pop()
+    return " ".join(tokens).strip()
+
+
+def extract_company_label(title: str, body: str) -> str:
+    """제목/본문에서 언론사명을 뽑는다 (표의 왼쪽 칸에 쓸 라벨)."""
+    combined = f"{title} {body}"
+
+    # 부고 형식: "이영섭(뉴스1 대표)씨 모친상" - 괄호 안에서 직함을 떼어내고 남는 걸 회사명으로 사용
+    parens = re.findall(r"\(([^)]*)\)", title)
+    if parens:
+        stripped = strip_trailing_job_title(parens[0])
+        if stripped:
+            return stripped
+
+    # 인사 형식: "IT조선 인사" 처럼 " 인사"로 끝나면 그 앞부분을 회사명으로 사용
+    m = re.match(r"^(.+?)\s*인사\b", title)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+
+    # 최후 수단: 매칭된 키워드 중 가장 긴 것을 라벨로 사용
+    for kw in sorted(MEDIA_KEYWORDS, key=len, reverse=True):
+        if kw in combined:
+            return kw
+
+    return title
+
+
+def enrich_items(items: list[Item]) -> None:
+    """기간 내 항목들의 개별 기사 페이지를 열어 본문/회사명을 채운다."""
+    for it in items:
+        headline, body = fetch_article_detail(it.link)
+        it.headline = headline or it.title
+        it.body = body
+        it.company = extract_company_label(it.headline, it.body)
+
+
+def build_email_html(window_end: datetime, personnel_media: list[Item], obituary_media: list[Item]) -> str:
+    date_str = format_korean_date(window_end)
+
+    def rows_html(items: list[Item]) -> str:
+        if not items:
+            return (
+                "<tr><td colspan='2' style='border:1px solid #ddd;padding:10px;color:#888;'>"
+                "해당 없음</td></tr>"
+            )
+        out = []
+        for it in items:
+            title_line = f"<div>{it.headline}</div>" if it.section == "부고" and it.headline else ""
+            body_text = it.body or "(본문 확인 필요 - 원문 링크 참고)"
+            out.append(
+                "<tr>"
+                f"<td style='border:1px solid #ddd;padding:8px;vertical-align:top;white-space:nowrap;'>{it.company}</td>"
+                "<td style='border:1px solid #ddd;padding:8px;vertical-align:top;'>"
+                f"{title_line}<div>{body_text}</div>"
+                f"<div style='margin-top:4px;'><a href='{it.link}' style='font-size:11px;color:#999;'>원문</a></div>"
+                "</td>"
+                "</tr>"
+            )
+        return "".join(out)
 
     return f"""
-    <div style="font-family:'Malgun Gothic',Apple SD Gothic Neo,sans-serif;max-width:640px;">
-      <h2>연합뉴스 언론사 인사·부고 다이제스트</h2>
-      <p style="color:#555;">
-        기간: {window_start.strftime('%Y-%m-%d %H:%M')} ~ {window_end.strftime('%Y-%m-%d %H:%M')} (KST)
-      </p>
-      {section_html('인사', personnel_media)}
-      {section_html('부고', obituary_media)}
-      <hr style="margin:24px 0;border:none;border-top:1px solid #eee;">
-      <p style="font-size:12px;color:#999;">
-        원본: <a href="{PERSONNEL_URL}">인사</a> / <a href="{OBITUARY_URL}">부고</a>
-      </p>
-      {diag_html}
+    <div style="font-family:'Malgun Gothic',Apple SD Gothic Neo,sans-serif;max-width:700px;">
+      <p>안녕하세요,</p>
+      <p>{date_str} 인사 / 부고 전달 드립니다.</p>
+      <p>감사합니다.</p>
+      <hr style="margin:20px 0;border:none;border-top:1px solid #ccc;">
+      <table style="border-collapse:collapse;width:100%;font-size:14px;">
+        <tr><th colspan="2" style="background:#fff2ac;text-align:left;padding:8px;border:1px solid #ddd;">인사</th></tr>
+        {rows_html(personnel_media)}
+        <tr><th colspan="2" style="background:#fff2ac;text-align:left;padding:8px;border:1px solid #ddd;">부고</th></tr>
+        {rows_html(obituary_media)}
+      </table>
     </div>
     """
 
@@ -279,7 +377,14 @@ def send_mail(subject: str, html_body: str) -> None:
 
 
 def main() -> int:
-    now = datetime.now(KST)
+    target_date_str = os.environ.get("TARGET_DATE")
+    if target_date_str:
+        # 테스트/재현용: 특정 날짜의 08:40 기준으로 실행한 것처럼 시뮬레이션합니다.
+        base_date = datetime.strptime(target_date_str, "%Y-%m-%d").replace(tzinfo=KST)
+        now = base_date.replace(hour=CUTOFF_HOUR, minute=CUTOFF_MINUTE) + timedelta(minutes=1)
+        print(f"[INFO] TARGET_DATE={target_date_str} 기준으로 테스트 실행 (실제 현재 시각 아님)")
+    else:
+        now = datetime.now(KST)
     window_end = now.replace(hour=CUTOFF_HOUR, minute=CUTOFF_MINUTE, second=0, microsecond=0)
     if now < window_end:
         # 기준 시각(08:40) 이전에 수동 실행된 경우 등, 기준을 오늘 08:40으로 맞추기 위한 보정
@@ -306,20 +411,22 @@ def main() -> int:
     personnel_in_window = [it for it in personnel_items if in_window(it, window_start, window_end)]
     obituary_in_window = [it for it in obituary_items if in_window(it, window_start, window_end)]
 
-    personnel_media = [it for it in personnel_in_window if it.is_media]
-    obituary_media = [it for it in obituary_in_window if it.is_media]
+    # 연합뉴스 /people/personnel, /people/obituary-notice 페이지 자체가 이미 언론계 인사·부고
+    # 전용 코너라서(실사용 데이터로 확인함), 별도 키워드 필터링 없이 기간 내 전체를 사용한다.
+    # 예전처럼 언론사 키워드로 다시 걸러내고 싶으면 `it.is_media` 조건을 추가하면 된다.
+    personnel_media = personnel_in_window
+    obituary_media = obituary_in_window
 
-    print(f"[INFO] 인사: 링크 {personnel_total}개 / 기간내 {len(personnel_in_window)}개 / 언론사 {len(personnel_media)}개")
-    print(f"[INFO] 부고: 링크 {obituary_total}개 / 기간내 {len(obituary_in_window)}개 / 언론사 {len(obituary_media)}개")
+    print(f"[INFO] 인사: 링크 {personnel_total}개 / 기간내 {len(personnel_in_window)}개")
+    print(f"[INFO] 부고: 링크 {obituary_total}개 / 기간내 {len(obituary_in_window)}개")
 
-    subject = f"[연합뉴스 다이제스트] 언론사 인사·부고 - {today_str} (인사 {len(personnel_media)} / 부고 {len(obituary_media)})"
-    body = build_email_html(
-        window_start,
-        window_end,
-        personnel_media,
-        obituary_media,
-        diagnostics={"personnel_total": personnel_total, "obituary_total": obituary_total},
-    )
+    # 기간 내 전체 항목의 개별 기사 페이지를 열어 본문/회사명을 채운다
+    enrich_items(personnel_media)
+    enrich_items(obituary_media)
+
+    date_str = format_korean_date(window_end)
+    subject = f"{date_str} 인사 / 부고"
+    body = build_email_html(window_end, personnel_media, obituary_media)
     send_mail(subject, body)
     print("[INFO] 메일 발송 완료")
     return 0
