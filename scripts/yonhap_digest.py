@@ -84,12 +84,16 @@ def format_korean_date(dt: datetime) -> str:
     return f"{dt.year}년 {dt.month}월 {dt.day}일 ({WEEKDAY_KO[dt.weekday()]})"
 
 
-# 본문 끝에 붙는 "(전남광주=연합뉴스)" 같은 송고처 표기를 제거하기 위한 패턴
-YONHAP_BYLINE_RE = re.compile(r"\s*\([^()]{0,20}=\s*연합뉴스\)\s*$")
+# "(전남광주=연합뉴스)" 같은 송고처 표기 + 뒤따르는 "홍길동 기자 = " 바이라인을 제거하기
+# 위한 패턴. 부고/인사 정형 공지는 이 표기가 본문 "끝"에 붙지만, 일반 뉴스 기사는 본문
+# "맨 앞"에 붙는다 (예: "(서울=연합뉴스) 이충원 기자 = 일본 럭비..."). 앞/뒤 어디에 있든
+# 지우지 않으면 "뉴스"라는 접미어 키워드가 "연합뉴스"라는 단어 자체와 매칭돼버려서,
+# 언론사와 무관한 일반 기사(예: 스포츠 선수 부고)까지 "언론사 관련"으로 잘못 판정된다.
+YONHAP_BYLINE_RE = re.compile(r"\([^()]{0,20}=\s*연합뉴스\)\s*(?:[가-힣]{2,4}\s*기자\s*=\s*)?")
 
 
 def strip_yonhap_byline(text: str) -> str:
-    return YONHAP_BYLINE_RE.sub("", text).strip()
+    return re.sub(r"\s+", " ", YONHAP_BYLINE_RE.sub(" ", text)).strip()
 
 
 @dataclass
