@@ -15,8 +15,9 @@
     예전의 "/view/ 링크 전체 훑기 + 제목 패턴 필터" 방식으로 자동 폴백한다 (_extract_fallback).
 
     이 페이지에는 언론계 인사·부고 외에 스포츠 선수, 연예인 등 일반 유명인의 부고도 같이
-    실린다(실사용 데이터로 확인함). 그래서 목록에서 뽑은 제목+본문에 언론사 키워드
+    실린다(실사용 데이터로 확인함). 그래서 목록에서 뽑은 제목에 언론사 키워드
     (config/media_keywords.txt)가 있는 항목만 최종적으로 메일에 포함한다 (Item.is_media).
+    본문까지 검사하면 기사가 인용한 다른 언론사 이름 때문에 오탐이 생겨서 제목만 본다.
     실제로 보내는 메일에 언론사가 아닌데 잘못 포함되거나, 언론사인데 빠진 항목이 보이면
     config/media_keywords.txt 에 키워드를 추가/조정하면 된다 (코드 수정 불필요).
         - 각 실행마다 원본 HTML을 debug/ 폴더에 저장해 GitHub Actions 아티팩트로 업로드합니다.
@@ -503,7 +504,7 @@ def main() -> int:
 
     # 연합뉴스 /people/personnel, /people/obituary-notice 페이지에는 언론계 인사·부고 외에
     # 스포츠 선수, 연예인 등 일반 유명인 부고도 같이 실린다(실사용 데이터로 확인함). 그래서
-    # 제목+본문에 언론사 키워드(config/media_keywords.txt)가 있는 항목만 최종 채택한다.
+    # 제목에 언론사 키워드(config/media_keywords.txt)가 있는 항목만 최종 채택한다.
     personnel_media = [it for it in personnel_in_window if it.is_media]
     obituary_media = [it for it in obituary_in_window if it.is_media]
 
@@ -511,7 +512,8 @@ def main() -> int:
     print(f"[INFO] 부고: 링크 {obituary_total}개 / 기간내 {len(obituary_in_window)}개 / 언론사 {len(obituary_media)}개")
 
     # 디버그: 기간 내로 잡힌 항목을 전부 로그에 출력 (엉뚱한 기사가 섞이는지 확인용)
-        for it in personnel_in_window:
+    # is_media 판정은 제목만 보므로(본문 인용 오탐 방지), 디버그도 제목만으로 매칭 키워드를 표시한다.
+    for it in personnel_in_window:
         kw = matched_media_keyword(it.title)
         print(f"[DEBUG][인사] media_kw={kw!r} | {it.dt} | {it.title} | {it.link}")
     for it in obituary_in_window:
