@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 연합뉴스 인사(人事)·부고 페이지를 확인해서, 직전 영업일 08:40 ~ 당일 08:40(KST) 사이에
-올라온 항목을 Outlook으로 메일을 보내는 스크립트.
+올라온 항목 중 "언론사" 관련 소식만 골라 Outlook으로 메일을 보내는 스크립트.
 월요일 실행분은 주말을 건너뛴 만큼(금요일 08:40부터) 모아서 확인합니다.
 
 실행 주체: GitHub Actions (평일 08:40 KST 스케줄)
@@ -13,6 +13,12 @@
     (.txt-time)이 이미 다 들어있다. 이 구조를 실제 페이지에서 확인해 반영했다 (extract_items /
     _extract_from_list_items 참고). 혹시 사이트 마크업이 바뀌어 이 구조를 하나도 못 찾으면,
     예전의 "/view/ 링크 전체 훑기 + 제목 패턴 필터" 방식으로 자동 폴백한다 (_extract_fallback).
+
+    이 페이지에는 언론계 인사·부고 외에 스포츠 선수, 연예인 등 일반 유명인의 부고도 같이
+    실린다(실사용 데이터로 확인함). 그래서 목록에서 뽑은 제목+본문에 언론사 키워드
+    (config/media_keywords.txt)가 있는 항목만 최종적으로 메일에 포함한다 (Item.is_media).
+    실제로 보내는 메일에 언론사가 아닌데 잘못 포함되거나, 언론사인데 빠진 항목이 보이면
+    config/media_keywords.txt 에 키워드를 추가/조정하면 된다 (코드 수정 불필요).
         - 각 실행마다 원본 HTML을 debug/ 폴더에 저장해 GitHub Actions 아티팩트로 업로드합니다.
         - 페이지 요청 자체가 실패하면(네트워크/차단 등) 예외를 삼키지 않고 알림 메일을 보냅니다.
     폴백이 동작했다는 로그("[WARN] li[data-cid] 구조를 찾지 못해...")가 보이면 마크업이 바뀐
@@ -57,7 +63,7 @@ KEYWORDS_PATH = Path(__file__).resolve().parent.parent / "config" / "media_keywo
 
 # 접미어만으로도 "언론사스러운" 이름을 넓게 잡기 위한 보조 목록.
 # config/media_keywords.txt 의 명시적 키워드와 함께 사용됩니다.
-SUFFIX_KEYWORDS = ["일보", "신문", "방송", "뉴스", "통신", "미디어", "타임스", "데일리", "저널", "매체"]
+SUFFIX_KEYWORDS = ["일보", "신문", "방송", "뉴스", "통신", "미디어", "타임스", "데일리", "저널", "매체", "매일"]
 
 # 기사(항목) 링크로 인식할 URL 패턴 (연합뉴스 기사 URL은 보통 /view/AKR... 형태)
 ARTICLE_LINK_RE = re.compile(r"/view/[A-Za-z0-9]+")
@@ -98,7 +104,7 @@ class Item:
 
     @property
     def is_media(self) -> bool:
-        return is_media_related(self.title)
+        return is_media_related(f"{self.title} {self.body}")
 
 
 def load_media_keywords() -> list[str]:
@@ -480,14 +486,14 @@ def main() -> int:
     personnel_in_window = [it for it in personnel_items if in_window(it, window_start, window_end)]
     obituary_in_window = [it for it in obituary_items if in_window(it, window_start, window_end)]
 
-    # 연합뉴스 /people/personnel, /people/obituary-notice 페이지 자체가 이미 언론계 인사·부고
-    # 전용 코너라서(실사용 데이터로 확인함), 별도 키워드 필터링 없이 기간 내 전체를 사용한다.
-    # 예전처럼 언론사 키워드로 다시 걸러내고 싶으면 `it.is_media` 조건을 추가하면 된다.
-    personnel_media = personnel_in_window
-    obituary_media = obituary_in_window
+    # 연합뉴스 /people/personnel, /people/obituary-notice 페이지에는 언론계 인사·부고 외에
+    # 스포츠 선수, 연예인 등 일반 유명인 부고도 같이 실린다(실사용 데이터로 확인함). 그래서
+    # 제목+본문에 언론사 키워드(config/media_keywords.txt)가 있는 항목만 최종 채택한다.
+    personnel_media = [it for it in personnel_in_window if it.is_media]
+    obituary_media = [it for it in obituary_in_window if it.is_media]
 
-    print(f"[INFO] 인사: 링크 {personnel_total}개 / 기간내 {len(personnel_in_window)}개")
-    print(f"[INFO] 부고: 링크 {obituary_total}개 / 기간내 {len(obituary_in_window)}개")
+    print(f"[INFO] 인사: 링크 {personnel_total}개 / 기간내 {len(personnel_in_window)}개 / 언론사 {len(personnel_media)}개")
+    print(f"[INFO] 부고: 링크 {obituary_total}개 / 기간내 {len(obituary_in_window)}개 / 언론사 {len(obituary_media)}개")
 
     # 디버그: 기간 내로 잡힌 항목을 전부 로그에 출력 (엉뚱한 기사가 섞이는지 확인용)
     for it in personnel_in_window:
