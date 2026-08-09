@@ -107,7 +107,7 @@ class Item:
     body: str = ""       # 기사 본문 (▲ 상세 내용)
 
     @property
-        def is_media(self) -> bool:
+    def is_media(self) -> bool:
         # 본문까지 검사하면 "~라고 OO 매체가 보도했다"처럼 기사가 인용한 다른 언론사 이름
         # 때문에 오탐이 생긴다(실사용 데이터로 확인함). 회사명은 항상 제목(또는 제목 안
         # 괄호)에 들어있으므로 제목만 검사한다.
