@@ -82,6 +82,11 @@ ZDNet
 OSEN
 스타뉴스
 
+# --- 일반 접미어로는 안 잡히는 실제 확인된 매체명 (실사용 중 누락 발견시 여기에 추가) ---
+IT조선
+오늘경제
+THE Biz
+
 # --- 일반 접미어(포괄 매칭용, scripts/yonhap_digest.py 의 SUFFIX_KEYWORDS 참고) ---
 언론사
 기자협회
