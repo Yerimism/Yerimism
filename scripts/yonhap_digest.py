@@ -14,8 +14,8 @@
     작성되었습니다. 즉, 정확한 CSS 클래스명에 의존하지 않고
         1) 기사 링크로 보이는 <a href="…/view/…"> 를 모두 찾고
         2) 그 앵커 주변 텍스트에서 날짜/시간 패턴을 정규식으로 찾아 매칭합니다.
-    이렇게 하면 사이트의 사소한 마크업 변경에는 잘 버티지만, 실제 페이지와 크게 다를 경우
-    항목을 하나도 못 찾을 수 있습니다. 그런 경우를 대비해:
+    다만 이렇게만 하면 사이드바/추천기사 등 페이지의 다른 /view/ 링크까지 섞일 수 있어서,
+    실제 인사/부고 제목 패턴("...인사"로 끝남 / "[부고]"로 시작함)에 맞는 것만 최종 채택합니다.
         - 각 실행마다 원본 HTML을 debug/ 폴더에 저장해 GitHub Actions 아티팩트로 업로드합니다.
         - 페이지 요청 자체가 실패하면(네트워크/차단 등) 예외를 삼키지 않고 알림 메일을 보냅니다.
     첫 실행 결과가 이상하면 debug/ 아티팩트를 열어보고 CSS 선택자를 조정해 주세요.
@@ -194,9 +194,24 @@ def extract_items(html: str, base_url: str, section: str, now: datetime) -> tupl
         if not title:
             continue
 
+        # 사이드바/추천기사(예: 다른 일반 뉴스)까지 /view/ 링크라는 이유로 섞여 들어오는 걸
+        # 막기 위해, 실제 인사/부고 항목의 제목 패턴("...인사"로 끝남 / "[부고]"로 시작함)에
+        # 맞는 것만 최종 채택한다.
+        if not looks_like_section_item(title, section):
+            continue
+
         items.append(Item(title=title, link=link, dt=dt, section=section))
 
     return items, total_links
+
+
+def looks_like_section_item(title: str, section: str) -> bool:
+    t = title.strip()
+    if section == "인사":
+        return t.endswith("인사")
+    if section == "부고":
+        return t.startswith("[부고]")
+    return True
 
 
 def in_window(item: Item, start: datetime, end: datetime) -> bool:
@@ -419,6 +434,12 @@ def main() -> int:
 
     print(f"[INFO] 인사: 링크 {personnel_total}개 / 기간내 {len(personnel_in_window)}개")
     print(f"[INFO] 부고: 링크 {obituary_total}개 / 기간내 {len(obituary_in_window)}개")
+
+    # 디버그: 기간 내로 잡힌 항목을 전부 로그에 출력 (엉뚱한 기사가 섞이는지 확인용)
+    for it in personnel_in_window:
+        print(f"[DEBUG][인사] {it.dt} | {it.title} | {it.link}")
+    for it in obituary_in_window:
+        print(f"[DEBUG][부고] {it.dt} | {it.title} | {it.link}")
 
     # 기간 내 전체 항목의 개별 기사 페이지를 열어 본문/회사명을 채운다
     enrich_items(personnel_media)
