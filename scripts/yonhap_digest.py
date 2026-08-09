@@ -256,9 +256,12 @@ def build_error_email_html(error: Exception) -> str:
 def send_mail(subject: str, html_body: str) -> None:
     smtp_user = os.environ["SMTP_USERNAME"]
     smtp_pass = os.environ["SMTP_PASSWORD"]
-    mail_to = os.environ.get("MAIL_TO", smtp_user)
-    smtp_server = os.environ.get("SMTP_SERVER", "smtp-mail.outlook.com")
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    # GitHub Actions는 등록되지 않은 시크릿도 "빈 문자열"로 넘겨준다(변수 자체가 없는 게 아님).
+    # os.environ.get(key, default)는 키가 존재하면 빈 문자열이라도 그대로 반환해버리므로
+    # 기본값이 무시된다. 그래서 `or`로 빈 문자열도 걸러내야 한다.
+    mail_to = os.environ.get("MAIL_TO") or smtp_user
+    smtp_server = os.environ.get("SMTP_SERVER") or "smtp-mail.outlook.com"
+    smtp_port = int(os.environ.get("SMTP_PORT") or "587")
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -266,8 +269,11 @@ def send_mail(subject: str, html_body: str) -> None:
     msg["To"] = mail_to
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    with smtplib.SMTP(smtp_server, smtp_port) as server:
+    print(f"[INFO] SMTP 연결 시도: {smtp_server}:{smtp_port} (user={smtp_user}, to={mail_to})")
+    with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as server:
+        server.ehlo()
         server.starttls()
+        server.ehlo()
         server.login(smtp_user, smtp_pass)
         server.sendmail(smtp_user, [mail_to], msg.as_string())
 
