@@ -121,8 +121,16 @@ def load_media_keywords() -> list[str]:
 MEDIA_KEYWORDS = load_media_keywords()
 
 
+def matched_media_keyword(text: str) -> str | None:
+    """is_media_related() 판정에 실제로 어떤 키워드가 매치됐는지(디버깅용)."""
+    for keyword in MEDIA_KEYWORDS:
+        if keyword in text:
+            return keyword
+    return None
+
+
 def is_media_related(text: str) -> bool:
-    return any(keyword in text for keyword in MEDIA_KEYWORDS)
+    return matched_media_keyword(text) is not None
 
 
 def fetch_html(url: str, label: str) -> str:
@@ -497,9 +505,11 @@ def main() -> int:
 
     # 디버그: 기간 내로 잡힌 항목을 전부 로그에 출력 (엉뚱한 기사가 섞이는지 확인용)
     for it in personnel_in_window:
-        print(f"[DEBUG][인사] {it.dt} | {it.title} | {it.link}")
+        kw = matched_media_keyword(f"{it.title} {it.body}")
+        print(f"[DEBUG][인사] media_kw={kw!r} | {it.dt} | {it.title} | body={it.body[:80]!r} | {it.link}")
     for it in obituary_in_window:
-        print(f"[DEBUG][부고] {it.dt} | {it.title} | {it.link}")
+        kw = matched_media_keyword(f"{it.title} {it.body}")
+        print(f"[DEBUG][부고] media_kw={kw!r} | {it.dt} | {it.title} | body={it.body[:80]!r} | {it.link}")
 
     # 기간 내 전체 항목의 개별 기사 페이지를 열어 본문/회사명을 채운다
     enrich_items(personnel_media)
