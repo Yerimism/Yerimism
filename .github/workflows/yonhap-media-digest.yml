@@ -5,7 +5,12 @@ on:
     # 08:40 KST(=UTC+9, 서머타임 없음) 평일 = UTC 23:40 일~목요일
     # (KST 월요일 08:40은 UTC로는 전날인 일요일 23:40이라 cron 요일이 하루씩 밀립니다)
     - cron: "40 23 * * 0-4"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "테스트용 기준 날짜 (YYYY-MM-DD). 비워두면 오늘 기준으로 실행."
+        required: false
+        type: string
 
 jobs:
   send-digest:
@@ -28,6 +33,7 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          TARGET_DATE: ${{ inputs.target_date }}
         run: python scripts/yonhap_digest.py
 
       # 파싱이 예상과 다를 때 원인을 확인할 수 있도록 원본 HTML을 항상 보관
