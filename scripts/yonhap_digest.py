@@ -344,18 +344,23 @@ JOB_TITLE_WORDS = [
 ]
 
 
+# "(향년 71세, 전 MBC 편성국장)"처럼 나이 정보가 같이 들어간 괄호에서 나이 부분을 제거하기 위한 패턴
+AGE_PATTERN = re.compile(r"향년\s*(?:만\s*)?\d+세\s*,?\s*")
+
+
 def strip_trailing_job_title(paren_text: str) -> str:
+    paren_text = AGE_PATTERN.sub("", paren_text).strip(" ,")
     tokens = paren_text.split()
     while tokens and any(w in tokens[-1] for w in JOB_TITLE_WORDS):
         tokens.pop()
-    return " ".join(tokens).strip()
+    return " ".join(tokens).strip(" ,")
 
 
 def extract_company_label(title: str, body: str) -> str:
     """제목/본문에서 언론사명을 뽑는다 (표의 왼쪽 칸에 쓸 라벨)."""
     combined = f"{title} {body}"
 
-    # 부고 형식: "이영섭(뉴스1 대표)씨 모친상" - 괄호 안에서 직함을 떼어내고 남는 걸 회사명으로 사용
+    # 부고 형식: "이영섭(뉴스1 대표)씨 모친상" - 괄호 안에서 나이/직함을 떼어내고 남는 걸 회사명으로 사용
     parens = re.findall(r"\(([^)]*)\)", title)
     if parens:
         stripped = strip_trailing_job_title(parens[0])
@@ -375,6 +380,20 @@ def extract_company_label(title: str, body: str) -> str:
     return title
 
 
+# 부고 본문(▲ 이름(소속)씨 관계, ... = 날짜정보)에서 "이름(소속)씨 관계" 부분을 뽑아
+# 표준 "[부고] 이름(소속)씨 관계" 제목을 새로 만들기 위한 패턴. 헤드라인형 기사(예: "'사랑이
+# 뭐길래' 수출로 한류 개척…박재복 전 MBC 국장 별세")처럼 제목이 정형 부고 형식이 아닐 때 씀.
+OBIT_LEAD_PATTERN = re.compile(r"▲\s*([가-힣]{2,4}(?:\([^)]{0,40}\))?)\s*씨\s*([가-힣]{1,6}상|별세)")
+
+
+def synthesize_obituary_title(body: str) -> str | None:
+    m = OBIT_LEAD_PATTERN.search(body)
+    if not m:
+        return None
+    name_part, relation = m.groups()
+    return f"[부고] {name_part}씨 {relation}"
+
+
 def enrich_items(items: list[Item]) -> None:
     """회사명을 채우고, 목록 페이지에 본문(lead)이 없었던 항목만 기사 페이지를 열어 보완한다."""
     for it in items:
@@ -384,6 +403,13 @@ def enrich_items(items: list[Item]) -> None:
             headline, body = fetch_article_detail(it.link)
             it.headline = headline or it.headline
             it.body = body
+
+        # 헤드라인형 기사는 표준 "[부고] 이름(소속)씨 관계" 형식으로 제목을 바꿔서 보여준다.
+        if it.section == "부고" and not it.headline.strip().startswith("[부고]"):
+            synthesized = synthesize_obituary_title(it.body)
+            if synthesized:
+                it.headline = synthesized
+
         it.company = extract_company_label(it.headline, it.body)
 
 
@@ -398,7 +424,11 @@ def build_email_html(window_end: datetime, personnel_media: list[Item], obituary
             )
         out = []
         for it in items:
-            title_line = f"<div>{it.headline}</div>" if it.section == "부고" and it.headline else ""
+            title_line = (
+                f"<div style='font-weight:bold;'>{it.headline}</div>"
+                if it.section == "부고" and it.headline
+                else ""
+            )
             body_text = it.body or "(본문 확인 필요 - 원문 링크 참고)"
             out.append(
                 "<tr>"
