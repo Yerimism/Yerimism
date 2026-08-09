@@ -381,17 +381,31 @@ def extract_company_label(title: str, body: str) -> str:
 
 
 # 부고 본문(▲ 이름(소속)씨 관계, ... = 날짜정보)에서 "이름(소속)씨 관계" 부분을 뽑아
-# 표준 "[부고] 이름(소속)씨 관계" 제목을 새로 만들기 위한 패턴. 헤드라인형 기사(예: "'사랑이
-# 뭐길래' 수출로 한류 개척…박재복 전 MBC 국장 별세")처럼 제목이 정형 부고 형식이 아닐 때 씀.
+# 표준 "[부고] 이름(소속)씨 관계" 제목을 새로 만들기 위한 패턴. 정형 부고 공지(예: 이두헌)는
+# 본문이 이 "▲" 불릿 형식이라 이걸로 잡힌다.
 OBIT_LEAD_PATTERN = re.compile(r"▲\s*([가-힣]{2,4}(?:\([^)]{0,40}\))?)\s*씨\s*([가-힣]{1,6}상|별세)")
 
+# 유명 인사는 정형 공지 대신 일반 기사 형식으로 올라온다(예: "'사랑이 뭐길래' 수출로 한류
+# 개척…박재복 전 MBC 국장 별세"). 이런 기사는 본문에 "▲" 불릿이 없어 OBIT_LEAD_PATTERN으로
+# 못 잡으므로, 제목 자체의 맨 끝에서 "이름 (전/현) 소속 직함 별세/OO상" 패턴을 찾는다. 앞에
+# 어떤 리드 문구가 붙어도(…로 구분) 문자열 끝에서부터 매칭하므로 영향받지 않는다.
+HEADLINE_OBIT_PATTERN = re.compile(
+    r"([가-힣]{2,4})\s+((?:전|현)\s?[가-힣A-Za-z0-9]+(?:\s[가-힣A-Za-z0-9·]+){0,4})\s*(별세|[가-힣]{1,6}상)\s*$"
+)
 
-def synthesize_obituary_title(body: str) -> str | None:
+
+def synthesize_obituary_title(headline: str, body: str) -> str | None:
     m = OBIT_LEAD_PATTERN.search(body)
-    if not m:
-        return None
-    name_part, relation = m.groups()
-    return f"[부고] {name_part}씨 {relation}"
+    if m:
+        name_part, relation = m.groups()
+        return f"[부고] {name_part}씨 {relation}"
+
+    m = HEADLINE_OBIT_PATTERN.search(headline.strip())
+    if m:
+        name, affiliation, relation = m.groups()
+        return f"[부고] {name}({affiliation.strip()})씨 {relation}"
+
+    return None
 
 
 def enrich_items(items: list[Item]) -> None:
@@ -406,7 +420,7 @@ def enrich_items(items: list[Item]) -> None:
 
         # 헤드라인형 기사는 표준 "[부고] 이름(소속)씨 관계" 형식으로 제목을 바꿔서 보여준다.
         if it.section == "부고" and not it.headline.strip().startswith("[부고]"):
-            synthesized = synthesize_obituary_title(it.body)
+            synthesized = synthesize_obituary_title(it.headline, it.body)
             if synthesized:
                 it.headline = synthesized
 
@@ -553,6 +567,15 @@ def main() -> int:
     # 기간 내 전체 항목의 개별 기사 페이지를 열어 본문/회사명을 채운다
     enrich_items(personnel_media)
     enrich_items(obituary_media)
+
+    # 디버그: 헤드라인형 부고 제목이 표준 형식으로 잘 변환됐는지(또는 왜 안 됐는지) 확인용.
+    # 위쪽 [DEBUG][부고] 로그는 원본 제목(it.title)을 찍지만, 이 로그는 enrich 이후
+    # 실제 메일에 나가는 최종 제목(it.headline)을 찍는다.
+    for it in obituary_media:
+        converted = "O" if it.headline.strip().startswith("[부고]") else "X"
+        print(f"[DEBUG][부고 enrich] 표준형식변환={converted} | headline={it.headline!r} | company={it.company!r}")
+        if converted == "X":
+            print(f"[DEBUG][부고 enrich]   body={it.body!r}")
 
     date_str = format_korean_date(window_end)
     subject = f"{date_str} 인사 / 부고"
