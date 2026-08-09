@@ -126,7 +126,11 @@ def matched_media_keyword(text: str) -> str | None:
     for keyword in MEDIA_KEYWORDS:
         if keyword in text:
             return keyword
-    return Non
+    return None
+
+
+def is_media_related(text: str) -> bool:
+    return matched_media_keyword(text) is not None
 
 
 def fetch_html(url: str, label: str) -> str:
