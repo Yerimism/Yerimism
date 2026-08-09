@@ -107,8 +107,11 @@ class Item:
     body: str = ""       # 기사 본문 (▲ 상세 내용)
 
     @property
-    def is_media(self) -> bool:
-        return is_media_related(f"{self.title} {self.body}")
+        def is_media(self) -> bool:
+        # 본문까지 검사하면 "~라고 OO 매체가 보도했다"처럼 기사가 인용한 다른 언론사 이름
+        # 때문에 오탐이 생긴다(실사용 데이터로 확인함). 회사명은 항상 제목(또는 제목 안
+        # 괄호)에 들어있으므로 제목만 검사한다.
+        return is_media_related(self.title)
 
 
 def load_media_keywords() -> list[str]:
@@ -508,12 +511,12 @@ def main() -> int:
     print(f"[INFO] 부고: 링크 {obituary_total}개 / 기간내 {len(obituary_in_window)}개 / 언론사 {len(obituary_media)}개")
 
     # 디버그: 기간 내로 잡힌 항목을 전부 로그에 출력 (엉뚱한 기사가 섞이는지 확인용)
-    for it in personnel_in_window:
-        kw = matched_media_keyword(f"{it.title} {it.body}")
-        print(f"[DEBUG][인사] media_kw={kw!r} | {it.dt} | {it.title} | body={it.body[:80]!r} | {it.link}")
+        for it in personnel_in_window:
+        kw = matched_media_keyword(it.title)
+        print(f"[DEBUG][인사] media_kw={kw!r} | {it.dt} | {it.title} | {it.link}")
     for it in obituary_in_window:
-        kw = matched_media_keyword(f"{it.title} {it.body}")
-        print(f"[DEBUG][부고] media_kw={kw!r} | {it.dt} | {it.title} | body={it.body[:80]!r} | {it.link}")
+        kw = matched_media_keyword(it.title)
+        print(f"[DEBUG][부고] media_kw={kw!r} | {it.dt} | {it.title} | {it.link}")
 
     # 기간 내 전체 항목의 개별 기사 페이지를 열어 본문/회사명을 채운다
     enrich_items(personnel_media)
