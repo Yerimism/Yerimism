@@ -7,18 +7,16 @@
 
 실행 주체: GitHub Actions (평일 08:40 KST 스케줄)
 
-주의(중요):
-    이 스크립트를 작성한 환경은 네트워크 정책상 yna.co.kr 에 직접 접속해 실제 HTML 구조를
-    확인할 수 없었습니다. 아래 파서는 연합뉴스 사이트의 일반적인 리스트 페이지 구조(기사 링크가
-    "/view/AKR..." 형태이고, 근처에 날짜/시간 텍스트가 있다)를 가정한 "관대한(lenient)" 방식으로
-    작성되었습니다. 즉, 정확한 CSS 클래스명에 의존하지 않고
-        1) 기사 링크로 보이는 <a href="…/view/…"> 를 모두 찾고
-        2) 그 앵커 주변 텍스트에서 날짜/시간 패턴을 정규식으로 찾아 매칭합니다.
-    다만 이렇게만 하면 사이드바/추천기사 등 페이지의 다른 /view/ 링크까지 섞일 수 있어서,
-    실제 인사/부고 제목 패턴("...인사"로 끝남 / "[부고]"로 시작함)에 맞는 것만 최종 채택합니다.
+파서 구조:
+    연합뉴스 인사/부고 목록의 각 항목은 <li data-cid="AKR..."> 로 감싸여 있고(사이드바 광고나
+    추천기사는 이 속성이 없어 구분됨), 그 안에 제목(.title01), 본문 요약(p.lead), 게시 시각
+    (.txt-time)이 이미 다 들어있다. 이 구조를 실제 페이지에서 확인해 반영했다 (extract_items /
+    _extract_from_list_items 참고). 혹시 사이트 마크업이 바뀌어 이 구조를 하나도 못 찾으면,
+    예전의 "/view/ 링크 전체 훑기 + 제목 패턴 필터" 방식으로 자동 폴백한다 (_extract_fallback).
         - 각 실행마다 원본 HTML을 debug/ 폴더에 저장해 GitHub Actions 아티팩트로 업로드합니다.
         - 페이지 요청 자체가 실패하면(네트워크/차단 등) 예외를 삼키지 않고 알림 메일을 보냅니다.
-    첫 실행 결과가 이상하면 debug/ 아티팩트를 열어보고 CSS 선택자를 조정해 주세요.
+    폴백이 동작했다는 로그("[WARN] li[data-cid] 구조를 찾지 못해...")가 보이면 마크업이 바뀐
+    것이니 debug/ 아티팩트를 열어 구조를 다시 확인해 주세요.
 """
 
 from __future__ import annotations
@@ -78,6 +76,14 @@ WEEKDAY_KO = ["월", "화", "수", "목", "금", "토", "일"]
 
 def format_korean_date(dt: datetime) -> str:
     return f"{dt.year}년 {dt.month}월 {dt.day}일 ({WEEKDAY_KO[dt.weekday()]})"
+
+
+# 본문 끝에 붙는 "(전남광주=연합뉴스)" 같은 송고처 표기를 제거하기 위한 패턴
+YONHAP_BYLINE_RE = re.compile(r"\s*\([^()]{0,20}=\s*연합뉴스\)\s*$")
+
+
+def strip_yonhap_byline(text: str) -> str:
+    return YONHAP_BYLINE_RE.sub("", text).strip()
 
 
 @dataclass
@@ -145,7 +151,56 @@ def parse_datetime_near(text: str, now: datetime) -> datetime | None:
 
 
 def extract_items(html: str, base_url: str, section: str, now: datetime) -> tuple[list[Item], int]:
-    """반환값: (매칭된 Item 리스트, 발견된 기사 링크 총 개수[진단용])"""
+    """반환값: (매칭된 Item 리스트, 발견된 목록 항목 총 개수[진단용])
+
+    실제 인사/부고 목록의 각 항목은 <li data-cid="AKR..."> 로 감싸여 있고(사이드바 광고/추천
+    기사는 이 속성이 없음), 그 안에 제목(.title01), 본문 요약(p.lead), 시간(.txt-time)이
+    이미 다 들어있다. 이 구조를 우선적으로 쓰고, 혹시 마크업이 바뀌어 하나도 못 찾으면
+    예전의 "페이지 전체에서 /view/ 링크 훑기" 방식으로 폴백한다.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    list_items = soup.find_all("li", attrs={"data-cid": True})
+
+    if list_items:
+        return _extract_from_list_items(list_items, base_url, section, now)
+
+    print(f"[WARN] li[data-cid] 구조를 찾지 못해 폴백 파서를 사용합니다 ({section})")
+    return _extract_fallback(html, base_url, section, now)
+
+
+def _extract_from_list_items(list_items, base_url: str, section: str, now: datetime) -> tuple[list[Item], int]:
+    items: list[Item] = []
+    seen_links: set[str] = set()
+
+    for li in list_items:
+        a = li.select_one("a.tit-news") or li.find("a", href=True)
+        if not a or not a.get("href"):
+            continue
+        href = a["href"]
+        link = href if href.startswith("http") else requests.compat.urljoin(base_url, href)
+        if link in seen_links:
+            continue
+        seen_links.add(link)
+
+        title_el = li.select_one(".title01") or a
+        title = re.sub(r"\s+", " ", title_el.get_text(" ", strip=True)).strip()
+        if not title:
+            continue
+
+        lead_el = li.select_one("p.lead")
+        body = re.sub(r"\s+", " ", lead_el.get_text(" ", strip=True)).strip() if lead_el else ""
+        body = strip_yonhap_byline(body)
+
+        time_el = li.select_one(".txt-time")
+        dt = parse_datetime_near(time_el.get_text(" ", strip=True), now) if time_el else None
+
+        items.append(Item(title=title, link=link, dt=dt, section=section, headline=title, body=body))
+
+    return items, len(list_items)
+
+
+def _extract_fallback(html: str, base_url: str, section: str, now: datetime) -> tuple[list[Item], int]:
+    """li[data-cid] 구조가 안 보일 때 쓰는 예전 방식 (관대하지만 사이드바가 섞일 수 있음)."""
     soup = BeautifulSoup(html, "lxml")
     seen_links: set[str] = set()
     items: list[Item] = []
@@ -159,7 +214,6 @@ def extract_items(html: str, base_url: str, section: str, now: datetime) -> tupl
         if link in seen_links:
             continue
 
-        # separator=" " 로 텍스트를 뽑아야 "제목08-07 09:12"처럼 단어가 붙어버리는 걸 방지
         raw_title = a.get_text(" ", strip=True)
         if not raw_title or len(raw_title) < 2:
             continue
@@ -167,7 +221,6 @@ def extract_items(html: str, base_url: str, section: str, now: datetime) -> tupl
         total_links += 1
         seen_links.add(link)
 
-        # 날짜는 앵커 자신 -> 부모 -> 조부모 순으로 텍스트를 넓혀가며 탐색
         dt = None
         date_match_str = None
         node = a
@@ -185,7 +238,6 @@ def extract_items(html: str, base_url: str, section: str, now: datetime) -> tupl
                 break
             node = node.parent
 
-        # 앵커 자체 텍스트에 날짜가 섞여 있으면(제목+시각이 같은 <a> 안에 있는 경우) 제거
         title = raw_title
         if date_match_str and date_match_str in title:
             title = title.replace(date_match_str, " ")
@@ -194,9 +246,7 @@ def extract_items(html: str, base_url: str, section: str, now: datetime) -> tupl
         if not title:
             continue
 
-        # 사이드바/추천기사(예: 다른 일반 뉴스)까지 /view/ 링크라는 이유로 섞여 들어오는 걸
-        # 막기 위해, 실제 인사/부고 항목의 제목 패턴("...인사"로 끝남 / "[부고]"로 시작함)에
-        # 맞는 것만 최종 채택한다.
+        # data-cid 구조가 없을 때만 쓰는 안전장치: 최소한 제목 패턴으로라도 걸러본다.
         if not looks_like_section_item(title, section):
             continue
 
@@ -257,6 +307,7 @@ def fetch_article_detail(url: str) -> tuple[str, str]:
 
     headline = re.sub(r"\s+", " ", headline).strip()
     body = re.sub(r"\s+", " ", body).strip()
+    body = strip_yonhap_byline(body)
     return headline, body
 
 
@@ -303,11 +354,14 @@ def extract_company_label(title: str, body: str) -> str:
 
 
 def enrich_items(items: list[Item]) -> None:
-    """기간 내 항목들의 개별 기사 페이지를 열어 본문/회사명을 채운다."""
+    """회사명을 채우고, 목록 페이지에 본문(lead)이 없었던 항목만 기사 페이지를 열어 보완한다."""
     for it in items:
-        headline, body = fetch_article_detail(it.link)
-        it.headline = headline or it.title
-        it.body = body
+        if not it.headline:
+            it.headline = it.title
+        if not it.body:
+            headline, body = fetch_article_detail(it.link)
+            it.headline = headline or it.headline
+            it.body = body
         it.company = extract_company_label(it.headline, it.body)
 
 
