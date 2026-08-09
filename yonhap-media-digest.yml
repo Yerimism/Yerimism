@@ -1,0 +1,41 @@
+name: Yonhap Media Personnel & Obituary Digest
+
+on:
+  schedule:
+    # 08:40 KST(=UTC+9, 서머타임 없음) 평일 = UTC 23:40 일~목요일
+    # (KST 월요일 08:40은 UTC로는 전날인 일요일 23:40이라 cron 요일이 하루씩 밀립니다)
+    - cron: "40 23 * * 0-4"
+  workflow_dispatch: {}
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run digest script
+        env:
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+        run: python scripts/yonhap_digest.py
+
+      # 파싱이 예상과 다를 때 원인을 확인할 수 있도록 원본 HTML을 항상 보관
+      - name: Upload debug HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-html-${{ github.run_id }}
+          path: debug/
+          retention-days: 7
+          if-no-files-found: ignore
