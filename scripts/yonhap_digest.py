@@ -360,6 +360,12 @@ def extract_company_label(title: str, body: str) -> str:
     """제목/본문에서 언론사명을 뽑는다 (표의 왼쪽 칸에 쓸 라벨)."""
     combined = f"{title} {body}"
 
+    # 인사 형식: "[인사] 코리아리포트"처럼 대괄호 접두어면 그 뒤를 회사명으로 사용.
+    # (실제 페이지 형식으로 확인함 - 부고의 "[부고] 이름..."과 같은 패턴.)
+    m = re.match(r"^\[인사\]\s*(.+)$", title.strip())
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+
     # 부고 형식: "이영섭(뉴스1 대표)씨 모친상" - 괄호 안에서 나이/직함을 떼어내고 남는 걸 회사명으로 사용
     parens = re.findall(r"\(([^)]*)\)", title)
     if parens:
@@ -367,8 +373,10 @@ def extract_company_label(title: str, body: str) -> str:
         if stripped:
             return stripped
 
-    # 인사 형식: "IT조선 인사" 처럼 " 인사"로 끝나면 그 앞부분을 회사명으로 사용
-    m = re.match(r"^(.+?)\s*인사\b", title)
+    # 인사 형식(구): "IT조선 인사"처럼 " 인사"로 끝나면 그 앞부분을 회사명으로 사용.
+    # 문자열 끝에 완전히 고정($)해야 한다 - 안 그러면 "[인사] 코리아리포트"에서 앞의
+    # "["만 회사명으로 잘못 뽑히는 버그가 생긴다("인사"가 title 중간에도 있기 때문).
+    m = re.match(r"^(.+?)\s*인사\s*$", title.strip())
     if m and m.group(1).strip():
         return m.group(1).strip()
 
