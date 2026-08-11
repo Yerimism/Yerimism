@@ -395,14 +395,27 @@ HEADLINE_OBIT_PATTERN = re.compile(
 
 
 def synthesize_obituary_title(headline: str, body: str) -> str | None:
-    m = OBIT_LEAD_PATTERN.search(body)
-    if m:
-        name_part, relation = m.groups()
+    headline_m = HEADLINE_OBIT_PATTERN.search(headline.strip())
+    body_m = OBIT_LEAD_PATTERN.search(body)
+
+    # 헤드라인(예: "박재복 전 MBC 국장 별세")과 본문 불릿(예: "▲ 박재복씨 별세, ...")이
+    # 같은 이름을 가리키면 "본인 부고"(=본인 본인상)로 본다. 이 경우 본문에는 소속 정보가
+    # 없는 게 보통이라(장례식장/발인 정보만 있음), 소속은 헤드라인에서 가져와 제목에 붙이고
+    # "별세"는 다른 항목들의 "이름(소속)씨 OO상" 패턴과 통일되도록 "본인상"으로 표시한다.
+    # (본문 텍스트 자체는 건드리지 않는다 - 이미 정리된 형식 그대로 둔다.)
+    if headline_m and body_m:
+        h_name, affiliation, _h_relation = headline_m.groups()
+        b_name, b_relation = body_m.groups()
+        if h_name == b_name:
+            relation = "본인상" if b_relation == "별세" else b_relation
+            return f"[부고] {h_name}({affiliation.strip()})씨 {relation}"
+
+    if body_m:
+        name_part, relation = body_m.groups()
         return f"[부고] {name_part}씨 {relation}"
 
-    m = HEADLINE_OBIT_PATTERN.search(headline.strip())
-    if m:
-        name, affiliation, relation = m.groups()
+    if headline_m:
+        name, affiliation, relation = headline_m.groups()
         return f"[부고] {name}({affiliation.strip()})씨 {relation}"
 
     return None
@@ -520,10 +533,15 @@ def main() -> int:
         print(f"[INFO] TARGET_DATE={target_date_str} 기준으로 테스트 실행 (실제 현재 시각 아님)")
     else:
         now = datetime.now(KST)
+    # window_end는 항상 "실행된 날짜의 08:40"으로 고정한다 (실제 실행 시각과 무관).
+    # GitHub Actions의 schedule 트리거는 혼잡 시간대(특히 UTC 자정 = 한국시간 오전 9시
+    # 부근)에 몰리면 수 분~수십 분씩 지연될 수 있는데(실사용 데이터로 확인함: 예약
+    # 08:40 대비 실제 실행 09:02~09:04), window_end를 실행 시각 기준으로 다시 계산하면
+    # "08:40 이전 실행 -> 어제 기준으로 취급"하는 예전 로직과 충돌해 지연이 적은 날에는
+    # 엉뚱하게 전날 기준으로 발송될 위험이 있었다. 실행 시각이 언제든(빨라도 늦어도)
+    # 08:40 컷오프는 항상 "그 날짜"로 고정해야 안전하다. 테스트/재현용(TARGET_DATE)도
+    # 이미 그 날짜의 08:40+1분으로 now를 맞춰 만들기 때문에 결과는 동일하다.
     window_end = now.replace(hour=CUTOFF_HOUR, minute=CUTOFF_MINUTE, second=0, microsecond=0)
-    if now < window_end:
-        # 기준 시각(08:40) 이전에 수동 실행된 경우 등, 기준을 오늘 08:40으로 맞추기 위한 보정
-        window_end -= timedelta(days=1)
 
     # 평일(월~금)에만 실행되는 걸 전제로 합니다. 월요일 실행분은 주말 동안 건너뛴 만큼
     # (금요일 08:40부터) 모아서 확인하고, 그 외 요일은 전날 08:40부터 확인합니다.
