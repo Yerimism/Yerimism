@@ -5,7 +5,11 @@
 올라온 항목 중 "언론사" 관련 소식만 골라 Outlook으로 메일을 보내는 스크립트.
 월요일 실행분은 주말을 건너뛴 만큼(금요일 08:40부터) 모아서 확인합니다.
 
-실행 주체: GitHub Actions (평일 08:40 KST 스케줄)
+실행 주체: GitHub Actions (평일 08:20 KST 스케줄, 스케줄러 지연 감안해 08:40 도착 목표)
+
+메일 발송: 스크래핑/필터링/HTML 조립은 이 스크립트(GitHub Actions)가 하고, 실제 발송은
+    Power Automate Flow에 위임한다 (send_mail 참고). 회사 M365 SMTP AUTH 제약을 안 받기
+    위함 - 수신자 변경 등은 코드가 아니라 Power Automate Flow에서 관리한다.
 
 파서 구조:
     연합뉴스 인사/부고 목록의 각 항목은 <li data-cid="AKR..."> 로 감싸여 있고(사이드바 광고나
@@ -30,12 +34,9 @@ from __future__ import annotations
 
 import os
 import re
-import smtplib
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -360,6 +361,12 @@ def extract_company_label(title: str, body: str) -> str:
     """제목/본문에서 언론사명을 뽑는다 (표의 왼쪽 칸에 쓸 라벨)."""
     combined = f"{title} {body}"
 
+    # 인사 형식: "[인사] 코리아리포트"처럼 대괄호 접두어면 그 뒤를 회사명으로 사용.
+    # (실제 페이지 형식으로 확인함 - 부고의 "[부고] 이름..."과 같은 패턴.)
+    m = re.match(r"^\[인사\]\s*(.+)$", title.strip())
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+
     # 부고 형식: "이영섭(뉴스1 대표)씨 모친상" - 괄호 안에서 나이/직함을 떼어내고 남는 걸 회사명으로 사용
     parens = re.findall(r"\(([^)]*)\)", title)
     if parens:
@@ -367,8 +374,10 @@ def extract_company_label(title: str, body: str) -> str:
         if stripped:
             return stripped
 
-    # 인사 형식: "IT조선 인사" 처럼 " 인사"로 끝나면 그 앞부분을 회사명으로 사용
-    m = re.match(r"^(.+?)\s*인사\b", title)
+    # 인사 형식(구): "IT조선 인사"처럼 " 인사"로 끝나면 그 앞부분을 회사명으로 사용.
+    # 문자열 끝에 완전히 고정($)해야 한다 - 안 그러면 "[인사] 코리아리포트"에서 앞의
+    # "["만 회사명으로 잘못 뽑히는 버그가 생긴다("인사"가 title 중간에도 있기 때문).
+    m = re.match(r"^(.+?)\s*인사\s*$", title.strip())
     if m and m.group(1).strip():
         return m.group(1).strip()
 
@@ -381,17 +390,44 @@ def extract_company_label(title: str, body: str) -> str:
 
 
 # 부고 본문(▲ 이름(소속)씨 관계, ... = 날짜정보)에서 "이름(소속)씨 관계" 부분을 뽑아
-# 표준 "[부고] 이름(소속)씨 관계" 제목을 새로 만들기 위한 패턴. 헤드라인형 기사(예: "'사랑이
-# 뭐길래' 수출로 한류 개척…박재복 전 MBC 국장 별세")처럼 제목이 정형 부고 형식이 아닐 때 씀.
+# 표준 "[부고] 이름(소속)씨 관계" 제목을 새로 만들기 위한 패턴. 정형 부고 공지(예: 이두헌)는
+# 본문이 이 "▲" 불릿 형식이라 이걸로 잡힌다.
 OBIT_LEAD_PATTERN = re.compile(r"▲\s*([가-힣]{2,4}(?:\([^)]{0,40}\))?)\s*씨\s*([가-힣]{1,6}상|별세)")
 
+# 유명 인사는 정형 공지 대신 일반 기사 형식으로 올라온다(예: "'사랑이 뭐길래' 수출로 한류
+# 개척…박재복 전 MBC 국장 별세"). 이런 기사는 본문에 "▲" 불릿이 없어 OBIT_LEAD_PATTERN으로
+# 못 잡으므로, 제목 자체의 맨 끝에서 "이름 (전/현) 소속 직함 별세/OO상" 패턴을 찾는다. 앞에
+# 어떤 리드 문구가 붙어도(…로 구분) 문자열 끝에서부터 매칭하므로 영향받지 않는다.
+HEADLINE_OBIT_PATTERN = re.compile(
+    r"([가-힣]{2,4})\s+((?:전|현)\s?[가-힣A-Za-z0-9]+(?:\s[가-힣A-Za-z0-9·]+){0,4})\s*(별세|[가-힣]{1,6}상)\s*$"
+)
 
-def synthesize_obituary_title(body: str) -> str | None:
-    m = OBIT_LEAD_PATTERN.search(body)
-    if not m:
-        return None
-    name_part, relation = m.groups()
-    return f"[부고] {name_part}씨 {relation}"
+
+def synthesize_obituary_title(headline: str, body: str) -> str | None:
+    headline_m = HEADLINE_OBIT_PATTERN.search(headline.strip())
+    body_m = OBIT_LEAD_PATTERN.search(body)
+
+    # 헤드라인(예: "박재복 전 MBC 국장 별세")과 본문 불릿(예: "▲ 박재복씨 별세, ...")이
+    # 같은 이름을 가리키면 "본인 부고"(=본인 본인상)로 본다. 이 경우 본문에는 소속 정보가
+    # 없는 게 보통이라(장례식장/발인 정보만 있음), 소속은 헤드라인에서 가져와 제목에 붙이고
+    # "별세"는 다른 항목들의 "이름(소속)씨 OO상" 패턴과 통일되도록 "본인상"으로 표시한다.
+    # (본문 텍스트 자체는 건드리지 않는다 - 이미 정리된 형식 그대로 둔다.)
+    if headline_m and body_m:
+        h_name, affiliation, _h_relation = headline_m.groups()
+        b_name, b_relation = body_m.groups()
+        if h_name == b_name:
+            relation = "본인상" if b_relation == "별세" else b_relation
+            return f"[부고] {h_name}({affiliation.strip()})씨 {relation}"
+
+    if body_m:
+        name_part, relation = body_m.groups()
+        return f"[부고] {name_part}씨 {relation}"
+
+    if headline_m:
+        name, affiliation, relation = headline_m.groups()
+        return f"[부고] {name}({affiliation.strip()})씨 {relation}"
+
+    return None
 
 
 def enrich_items(items: list[Item]) -> None:
@@ -406,7 +442,7 @@ def enrich_items(items: list[Item]) -> None:
 
         # 헤드라인형 기사는 표준 "[부고] 이름(소속)씨 관계" 형식으로 제목을 바꿔서 보여준다.
         if it.section == "부고" and not it.headline.strip().startswith("[부고]"):
-            synthesized = synthesize_obituary_title(it.body)
+            synthesized = synthesize_obituary_title(it.headline, it.body)
             if synthesized:
                 it.headline = synthesized
 
@@ -435,7 +471,6 @@ def build_email_html(window_end: datetime, personnel_media: list[Item], obituary
                 f"<td style='border:1px solid #ddd;padding:8px;vertical-align:top;white-space:nowrap;'>{it.company}</td>"
                 "<td style='border:1px solid #ddd;padding:8px;vertical-align:top;'>"
                 f"{title_line}<div>{body_text}</div>"
-                f"<div style='margin-top:4px;'><a href='{it.link}' style='font-size:11px;color:#999;'>원문</a></div>"
                 "</td>"
                 "</tr>"
             )
@@ -473,28 +508,23 @@ def build_error_email_html(error: Exception) -> str:
 
 
 def send_mail(subject: str, html_body: str) -> None:
-    smtp_user = os.environ["SMTP_USERNAME"]
-    smtp_pass = os.environ["SMTP_PASSWORD"]
-    # GitHub Actions는 등록되지 않은 시크릿도 "빈 문자열"로 넘겨준다(변수 자체가 없는 게 아님).
-    # os.environ.get(key, default)는 키가 존재하면 빈 문자열이라도 그대로 반환해버리므로
-    # 기본값이 무시된다. 그래서 `or`로 빈 문자열도 걸러내야 한다.
-    mail_to = os.environ.get("MAIL_TO") or smtp_user
-    smtp_server = os.environ.get("SMTP_SERVER") or "smtp-mail.outlook.com"
-    smtp_port = int(os.environ.get("SMTP_PORT") or "587")
+    """실제 메일 발송은 Power Automate Flow에 맡긴다.
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = smtp_user
-    msg["To"] = mail_to
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    예전에는 회사 M365 테넌트가 SMTP AUTH를 막아둔 탓에 개인 Gmail 계정으로
+    우회 발송했었다. Power Automate의 Office 365 Outlook 커넥터는 OAuth
+    인증을 쓰기 때문에 그 제약을 받지 않아서, 회사 Outlook 계정으로 직접
+    보낼 수 있다. 여기서는 Flow의 HTTP 트리거("이 HTTP 요청이 수신되면")
+    URL로 제목/본문만 JSON으로 POST하고, 실제 "메일 보내기" 액션과 수신자
+    설정은 Power Automate Flow 쪽에서 관리한다(수신자를 바꾸고 싶으면 코드
+    수정 없이 Flow만 고치면 됨).
+    """
+    webhook_url = os.environ["POWER_AUTOMATE_URL"]
+    payload = {"subject": subject, "body": html_body}
 
-    print(f"[INFO] SMTP 연결 시도: {smtp_server}:{smtp_port} (user={smtp_user}, to={mail_to})")
-    with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as server:
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login(smtp_user, smtp_pass)
-        server.sendmail(smtp_user, [mail_to], msg.as_string())
+    print("[INFO] Power Automate Flow 호출 시도")
+    resp = requests.post(webhook_url, json=payload, timeout=30)
+    resp.raise_for_status()
+    print(f"[INFO] Power Automate 응답: {resp.status_code}")
 
 
 def main() -> int:
@@ -506,10 +536,15 @@ def main() -> int:
         print(f"[INFO] TARGET_DATE={target_date_str} 기준으로 테스트 실행 (실제 현재 시각 아님)")
     else:
         now = datetime.now(KST)
+    # window_end는 항상 "실행된 날짜의 08:40"으로 고정한다 (실제 실행 시각과 무관).
+    # GitHub Actions의 schedule 트리거는 혼잡 시간대(특히 UTC 자정 = 한국시간 오전 9시
+    # 부근)에 몰리면 수 분~수십 분씩 지연될 수 있는데(실사용 데이터로 확인함: 예약
+    # 08:40 대비 실제 실행 09:02~09:04), window_end를 실행 시각 기준으로 다시 계산하면
+    # "08:40 이전 실행 -> 어제 기준으로 취급"하는 예전 로직과 충돌해 지연이 적은 날에는
+    # 엉뚱하게 전날 기준으로 발송될 위험이 있었다. 실행 시각이 언제든(빨라도 늦어도)
+    # 08:40 컷오프는 항상 "그 날짜"로 고정해야 안전하다. 테스트/재현용(TARGET_DATE)도
+    # 이미 그 날짜의 08:40+1분으로 now를 맞춰 만들기 때문에 결과는 동일하다.
     window_end = now.replace(hour=CUTOFF_HOUR, minute=CUTOFF_MINUTE, second=0, microsecond=0)
-    if now < window_end:
-        # 기준 시각(08:40) 이전에 수동 실행된 경우 등, 기준을 오늘 08:40으로 맞추기 위한 보정
-        window_end -= timedelta(days=1)
 
     # 평일(월~금)에만 실행되는 걸 전제로 합니다. 월요일 실행분은 주말 동안 건너뛴 만큼
     # (금요일 08:40부터) 모아서 확인하고, 그 외 요일은 전날 08:40부터 확인합니다.
@@ -553,6 +588,15 @@ def main() -> int:
     # 기간 내 전체 항목의 개별 기사 페이지를 열어 본문/회사명을 채운다
     enrich_items(personnel_media)
     enrich_items(obituary_media)
+
+    # 디버그: 헤드라인형 부고 제목이 표준 형식으로 잘 변환됐는지(또는 왜 안 됐는지) 확인용.
+    # 위쪽 [DEBUG][부고] 로그는 원본 제목(it.title)을 찍지만, 이 로그는 enrich 이후
+    # 실제 메일에 나가는 최종 제목(it.headline)을 찍는다.
+    for it in obituary_media:
+        converted = "O" if it.headline.strip().startswith("[부고]") else "X"
+        print(f"[DEBUG][부고 enrich] 표준형식변환={converted} | headline={it.headline!r} | company={it.company!r}")
+        if converted == "X":
+            print(f"[DEBUG][부고 enrich]   body={it.body!r}")
 
     date_str = format_korean_date(window_end)
     subject = f"{date_str} 인사 / 부고"
