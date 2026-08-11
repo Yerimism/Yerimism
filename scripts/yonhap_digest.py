@@ -5,11 +5,7 @@
 올라온 항목 중 "언론사" 관련 소식만 골라 Outlook으로 메일을 보내는 스크립트.
 월요일 실행분은 주말을 건너뛴 만큼(금요일 08:40부터) 모아서 확인합니다.
 
-실행 주체: GitHub Actions (평일 08:20 KST 스케줄, 스케줄러 지연 감안해 08:40 도착 목표)
-
-메일 발송: 스크래핑/필터링/HTML 조립은 이 스크립트(GitHub Actions)가 하고, 실제 발송은
-    Power Automate Flow에 위임한다 (send_mail 참고). 회사 M365 SMTP AUTH 제약을 안 받기
-    위함 - 수신자 변경 등은 코드가 아니라 Power Automate Flow에서 관리한다.
+실행 주체: GitHub Actions (평일 08:40 KST 스케줄)
 
 파서 구조:
     연합뉴스 인사/부고 목록의 각 항목은 <li data-cid="AKR..."> 로 감싸여 있고(사이드바 광고나
@@ -34,9 +30,12 @@ from __future__ import annotations
 
 import os
 import re
+import smtplib
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -508,23 +507,28 @@ def build_error_email_html(error: Exception) -> str:
 
 
 def send_mail(subject: str, html_body: str) -> None:
-    """실제 메일 발송은 Power Automate Flow에 맡긴다.
+    smtp_user = os.environ["SMTP_USERNAME"]
+    smtp_pass = os.environ["SMTP_PASSWORD"]
+    # GitHub Actions는 등록되지 않은 시크릿도 "빈 문자열"로 넘겨준다(변수 자체가 없는 게 아님).
+    # os.environ.get(key, default)는 키가 존재하면 빈 문자열이라도 그대로 반환해버리므로
+    # 기본값이 무시된다. 그래서 `or`로 빈 문자열도 걸러내야 한다.
+    mail_to = os.environ.get("MAIL_TO") or smtp_user
+    smtp_server = os.environ.get("SMTP_SERVER") or "smtp-mail.outlook.com"
+    smtp_port = int(os.environ.get("SMTP_PORT") or "587")
 
-    예전에는 회사 M365 테넌트가 SMTP AUTH를 막아둔 탓에 개인 Gmail 계정으로
-    우회 발송했었다. Power Automate의 Office 365 Outlook 커넥터는 OAuth
-    인증을 쓰기 때문에 그 제약을 받지 않아서, 회사 Outlook 계정으로 직접
-    보낼 수 있다. 여기서는 Flow의 HTTP 트리거("이 HTTP 요청이 수신되면")
-    URL로 제목/본문만 JSON으로 POST하고, 실제 "메일 보내기" 액션과 수신자
-    설정은 Power Automate Flow 쪽에서 관리한다(수신자를 바꾸고 싶으면 코드
-    수정 없이 Flow만 고치면 됨).
-    """
-    webhook_url = os.environ["POWER_AUTOMATE_URL"]
-    payload = {"subject": subject, "body": html_body}
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = smtp_user
+    msg["To"] = mail_to
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    print("[INFO] Power Automate Flow 호출 시도")
-    resp = requests.post(webhook_url, json=payload, timeout=30)
-    resp.raise_for_status()
-    print(f"[INFO] Power Automate 응답: {resp.status_code}")
+    print(f"[INFO] SMTP 연결 시도: {smtp_server}:{smtp_port} (user={smtp_user}, to={mail_to})")
+    with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(smtp_user, smtp_pass)
+        server.sendmail(smtp_user, [mail_to], msg.as_string())
 
 
 def main() -> int:
