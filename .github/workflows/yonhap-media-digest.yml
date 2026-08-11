@@ -36,10 +36,10 @@ jobs:
 
       - name: Run digest script
         env:
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          MAIL_TO: ${{ secrets.MAIL_TO }}
-          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          # 실제 발송은 Power Automate Flow(Office 365 Outlook 커넥터)가 담당한다.
+          # 이 URL은 그 Flow의 HTTP 트리거 주소이고, 아는 사람은 누구나 메일을 보낼 수
+          # 있게 되므로 반드시 시크릿으로만 보관한다.
+          POWER_AUTOMATE_URL: ${{ secrets.POWER_AUTOMATE_URL }}
           TARGET_DATE: ${{ inputs.target_date }}
         run: python scripts/yonhap_digest.py
 
