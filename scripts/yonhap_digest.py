@@ -470,7 +470,6 @@ def build_email_html(window_end: datetime, personnel_media: list[Item], obituary
                 f"<td style='border:1px solid #ddd;padding:8px;vertical-align:top;white-space:nowrap;'>{it.company}</td>"
                 "<td style='border:1px solid #ddd;padding:8px;vertical-align:top;'>"
                 f"{title_line}<div>{body_text}</div>"
-                f"<div style='margin-top:4px;'><a href='{it.link}' style='font-size:11px;color:#999;'>원문</a></div>"
                 "</td>"
                 "</tr>"
             )
